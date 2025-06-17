@@ -1,86 +1,111 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-#define TAPESZ 65536
+#define TAPESZ 32768
 
 static const char *instr_set = "+-<>[],.";
 
-static size_t
-get_line(char *buffer, size_t bufsz, char *filename)
+void
+file_seek_to(FILE *fp, char sentinel)
 {
-    static char ch;
-    size_t nread;
-    size_t buflen = 0;
+    int ch;
 
-    FILE *file = fopen(filename, "r");
+    while((ch = fgetc(fp)) != EOF)
+        if(ch == sentinel)
+            return;
+}
 
-    if (file == NULL || feof(file))
-        goto exit_eof;
+static ssize_t
+file_read_line(char *buffer, size_t bufsz, FILE *fp)
+{
+    int ch;
+    char *bufp = buffer;
 
-    if (ferror(file))
-        goto exit_ferror;
-
-    while (buflen < bufsz) {
-        if ((nread = fread(&ch, sizeof ch, 1, file)) == 0 || ch == '\n')
+    while((ch = fgetc(fp)) != EOF){
+        if(ch == '\n')
             break;
 
-        buffer[buflen++] = ch;
+        /* ignore the rest of the line*/
+        if((size_t)(bufp - buffer) == bufsz - 1){
+            file_seek_to(fp, '\n');
+            break;
+        }
+
+        *bufp++ = ch;
     }
 
-    return buflen;
+    if(ch == EOF)
+        return -1;
 
-exit_ferror:
-    {
-        fprintf(stderr, "get_line_implementation: Encountered I/O error.\n");
-        return 0;
-    }
-
-exit_eof:
-    return 0;
+    *bufp = 0;
+    return (ssize_t)(bufp - buffer);
 }
 
 static void
-build_lookup_table(char const *code, int *table)
+seek_to_closing_bracket(FILE *f)
 {
-    int stack[TAPESZ];
-    int top = -1;
+    int ch;
+    int depth = 0;
 
-    for (int i = 0; code[i]; ++i) {
-        if (code[i] == '[')
-            stack[++top] = i;
+    while((ch = fgetc(f)) != EOF){
+        if(ch == '[')
+            ++depth;
 
-        else if (code[i] == ']') {
-            if (top < 0)
-                goto exit_mismatch;
+        if(ch == ']'){
+            --depth;
 
-            int start = stack[top--];
-
-            table[start] = i;
-            table[i] = start;
+            if(depth == -1)
+                return;
         }
     }
+}
 
-    if (top >= 0)
-        goto exit_mismatch;
+static int
+minify(FILE *f)
+{
+    int ch;
+    int first_write = 0;
+    int last_ch = 0;
 
-    return;
+    if(f == NULL)
+        return 0;
 
-exit_mismatch:
-    {
-        fprintf(stderr, "build_lookup_table(): Encountered mismatching brackets.\n");
-        exit(1);
+    while((ch = fgetc(f)) != EOF){
+        /* strip non-bf characters */
+        if(strchr("+-><[],.", ch) == NULL)
+            continue;
+
+        /* strip useless loops (immediately follows another loop) */
+        if(last_ch == ']' && ch == '[' ){
+            seek_to_closing_bracket(f);
+            continue;
+        }
+
+        if(first_write == 0){
+            /* strip useless loops (cells haven't been modified) */
+            if(ch == '['){
+                seek_to_closing_bracket(f);
+                continue;
+            }
+
+            if(strchr("+-,", ch) != NULL)
+                first_write = 1;
+        }
+
+        putchar(ch);
+        last_ch = ch;
     }
+
+    return 1;
 }
 
 static void
 interpret(char const *code)
 {
     unsigned char tape[TAPESZ] = {0};
-    int jmptable[TAPESZ] = {0};
     int dataptr = 0;
     int instrptr = 0;
-
-    build_lookup_table(code, jmptable);
 
     while (code[instrptr] != '\0')
     {
@@ -92,15 +117,39 @@ interpret(char const *code)
             case '<': --dataptr; break;
             case '.': putchar(tape[dataptr]); break;
             case ',': tape[dataptr] = getchar(); break;
-
             case '[':
-                      if (tape[dataptr] == 0)
-                          instrptr = jmptable[instrptr];
-                      break;
+                      if (tape[dataptr] == 0) {
+                          int depth = 0;
 
+                          while (++instrptr) {
+                              if (code[instrptr] == '[')
+                                  depth += 1;
+                              if (code[instrptr] == ']') {
+                                  if (depth == 0)
+                                      break;
+
+                                  depth -= 1;
+                              }
+                          }
+                      }
+                      break;
             case ']':
-                      if (tape[dataptr] != 0)
-                          instrptr = jmptable[instrptr];
+                      if (tape[dataptr] != 0) {
+                          int depth = 0;
+
+                          while (--instrptr) {
+                              if (code[instrptr] == ']')
+                                  depth += 1;
+                              if (code[instrptr] == '[') {
+                                  if (depth == 0)
+                                      break;
+
+                                  depth -= 1;
+                              }
+                          }
+                      }
+                      break;
+            default:
                       break;
         }
         instrptr++;
@@ -120,12 +169,15 @@ main(int argc, char **argv)
     if (argc < 2)
         usage(argv[0]);
 
-    char code[TAPESZ];
-    size_t nread;
+    FILE *fp = fopen(argv[1], "r");
+    if (fp == NULL)
+        return 1;
 
-    nread = get_line(code, TAPESZ, argv[1]);
+    char code[TAPESZ] = {0};
+    size_t len = fread(code, 1, TAPESZ - 1, fp);
 
-    printf("%.*s %lu\n", (int)nread, code, nread);
+    code[len] = '\0';
+    fclose(fp);
 
     interpret(code);
 
